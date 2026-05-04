@@ -49,6 +49,26 @@ from aiohttp.web_urldispatcher import Resource, SystemRoute
             b"my_file_in_dir</a></li>\n</ul>\n</body>\n</html>",
             id="index_subdir",
         ),
+        pytest.param(
+            True,
+            200,
+            "/static",
+            "/static/",
+            b"<html>\n<head>\n<title>Index of /.</title>\n</head>\n<body>\n<h1>Index of"
+            b' /.</h1>\n<ul>\n<li><a href="/static/my_dir">my_dir/</a></li>\n<li><a href="'
+            b'/static/my_file">my_file</a></li>\n</ul>\n</body>\n</html>',
+            id="index_static_trailing_slash",
+        ),
+        pytest.param(
+            True,
+            200,
+            "/static",
+            "/static/my_dir/",
+            b"<html>\n<head>\n<title>Index of /my_dir</title>\n</head>\n<body>\n<h1>"
+            b'Index of /my_dir</h1>\n<ul>\n<li><a href="/static/my_dir/my_file_in_dir">'
+            b"my_file_in_dir</a></li>\n</ul>\n</body>\n</html>",
+            id="index_subdir_trailing_slash",
+        ),
     ],
 )
 async def test_access_root_of_static_handler(
@@ -229,7 +249,7 @@ async def test_follow_symlink_directory_traversal(
     # We need to use a raw socket to test this, as the client will normalize
     # the path before sending it to the server.
     reader, writer = await asyncio.open_connection(client.host, client.port)
-    writer.write(b"GET /../private_file HTTP/1.1\r\n\r\n")
+    writer.write(b"GET /../private_file HTTP/1.1\r\nHost: a\r\n\r\n")
     response = await reader.readuntil(b"\r\n\r\n")
     assert b"404 Not Found" in response
     writer.close()
@@ -281,14 +301,14 @@ async def test_follow_symlink_directory_traversal_after_normalization(
     # We need to use a raw socket to test this, as the client will normalize
     # the path before sending it to the server.
     reader, writer = await asyncio.open_connection(client.host, client.port)
-    writer.write(b"GET /my_symlink/../private_file HTTP/1.1\r\n\r\n")
+    writer.write(b"GET /my_symlink/../private_file HTTP/1.1\r\nHost: a\r\n\r\n")
     response = await reader.readuntil(b"\r\n\r\n")
     assert b"404 Not Found" in response
     writer.close()
     await writer.wait_closed()
 
     reader, writer = await asyncio.open_connection(client.host, client.port)
-    writer.write(b"GET /my_symlink/symlink_target_file HTTP/1.1\r\n\r\n")
+    writer.write(b"GET /my_symlink/symlink_target_file HTTP/1.1\r\nHost: a\r\n\r\n")
     response = await reader.readuntil(b"\r\n\r\n")
     assert b"200 OK" in response
     response = await reader.readuntil(b"readable")
@@ -839,8 +859,8 @@ async def test_static_absolute_url(
     here = pathlib.Path(__file__).parent
     app.router.add_static("/static", here)
     client = await aiohttp_client(app)
-    resp = await client.get("/static/" + str(file_path.resolve()))
-    assert resp.status == 403
+    async with client.get("/static/" + str(file_path.resolve())) as resp:
+        assert resp.status == 404
 
 
 async def test_for_issue_5250(

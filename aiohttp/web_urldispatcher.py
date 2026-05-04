@@ -7,6 +7,7 @@ import html
 import inspect
 import keyword
 import os
+import platform
 import re
 import sys
 import warnings
@@ -30,7 +31,7 @@ from yarl import URL, __version__ as yarl_version
 
 from . import hdrs
 from .abc import AbstractMatchInfo, AbstractRouter, AbstractView
-from .helpers import DEBUG
+from .helpers import DEBUG, DEFAULT_CHUNK_SIZE
 from .http import HttpVersion11
 from .typedefs import Handler, PathLike
 from .web_exceptions import (
@@ -78,6 +79,7 @@ ROUTE_RE: Final[Pattern[str]] = re.compile(
 )
 PATH_SEP: Final[str] = re.escape("/")
 
+IS_WINDOWS: Final[bool] = platform.system() == "Windows"
 
 _ExpectHandler = Callable[[Request], Awaitable[StreamResponse | None]]
 _Resolve = tuple[Optional["UrlMappingMatchInfo"], set[str]]
@@ -534,7 +536,7 @@ class StaticResource(PrefixResource):
         *,
         name: str | None = None,
         expect_handler: _ExpectHandler | None = None,
-        chunk_size: int = 256 * 1024,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
         show_index: bool = False,
         follow_symlinks: bool = False,
         append_version: bool = False,
@@ -629,7 +631,12 @@ class StaticResource(PrefixResource):
     async def resolve(self, request: Request) -> _Resolve:
         path = request.rel_url.path_safe
         method = request.method
-        if not path.startswith(self._prefix2) and path != self._prefix:
+        # We normalise here to avoid matches that traverse below the static root.
+        # e.g. /static/../../../../home/user/webapp/static/
+        norm_path = os.path.normpath(path)
+        if IS_WINDOWS:
+            norm_path = norm_path.replace("\\", "/")
+        if not norm_path.startswith(self._prefix2) and norm_path != self._prefix:
             return None, set()
 
         allowed_methods = self._allowed_methods
@@ -646,14 +653,11 @@ class StaticResource(PrefixResource):
         return iter(self._routes.values())
 
     async def _handle(self, request: Request) -> StreamResponse:
-        rel_url = request.match_info["filename"]
-        filename = Path(rel_url)
-        if filename.anchor:
-            # rel_url is an absolute name like
-            # /static/\\machine_name\c$ or /static/D:\path
-            # where the static dir is totally different
-            raise HTTPForbidden()
-
+        filename = request.match_info["filename"]
+        if Path(filename).is_absolute():
+            # filename is an absolute path e.g. //network/share or D:\path
+            # which could be a UNC path leading to NTLM credential theft
+            raise HTTPNotFound()
         unresolved_path = self._directory.joinpath(filename)
         loop = asyncio.get_running_loop()
         return await loop.run_in_executor(
@@ -1162,7 +1166,7 @@ class UrlDispatcher(AbstractRouter, Mapping[str, AbstractResource]):
         *,
         name: str | None = None,
         expect_handler: _ExpectHandler | None = None,
-        chunk_size: int = 256 * 1024,
+        chunk_size: int = DEFAULT_CHUNK_SIZE,
         show_index: bool = False,
         follow_symlinks: bool = False,
         append_version: bool = False,

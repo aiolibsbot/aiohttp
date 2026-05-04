@@ -10,7 +10,7 @@ import warnings
 from collections.abc import Iterator, Mapping, MutableMapping
 from re import Pattern
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Any, Final, Optional, cast
+from typing import TYPE_CHECKING, Any, Final, Optional, TypeVar, cast, overload
 from urllib.parse import parse_qsl
 
 import attr
@@ -29,11 +29,13 @@ from .abc import AbstractStreamWriter
 from .helpers import (
     _SENTINEL,
     DEBUG,
+    DEFAULT_CHUNK_SIZE,
     ETAG_ANY,
     LIST_QUOTED_ETAG_RE,
     ChainMapProxy,
     ETag,
     HeadersMixin,
+    RequestKey,
     parse_http_date,
     reify,
     sentinel,
@@ -50,7 +52,7 @@ from .typedefs import (
     RawHeaders,
     StrOrURL,
 )
-from .web_exceptions import HTTPRequestEntityTooLarge
+from .web_exceptions import HTTPRequestEntityTooLarge, NotAppKeyWarning
 from .web_response import StreamResponse
 
 __all__ = ("BaseRequest", "FileField", "Request")
@@ -60,6 +62,9 @@ if TYPE_CHECKING:
     from .web_app import Application
     from .web_protocol import RequestHandler
     from .web_urldispatcher import UrlMappingMatchInfo
+
+
+_T = TypeVar("_T")
 
 
 @attr.s(auto_attribs=True, frozen=True, slots=True)
@@ -86,6 +91,7 @@ _QUOTED_PAIR: Final[str] = r"\\[\t !-~]"
 
 _QUOTED_STRING: Final[str] = rf'"(?:{_QUOTED_PAIR}|{_QDTEXT})*"'
 
+# This does not have a ReDOS/performance concern as long as it used with re.match().
 _FORWARDED_PAIR: Final[str] = rf"({_TOKEN})=({_TOKEN}|{_QUOTED_STRING})(:\d{{1,4}})?"
 
 _QUOTED_PAIR_REPLACE_RE: Final[Pattern[str]] = re.compile(r"\\([\t !-~])")
@@ -98,8 +104,7 @@ _FORWARDED_PAIR_RE: Final[Pattern[str]] = re.compile(_FORWARDED_PAIR)
 ############################################################
 
 
-class BaseRequest(MutableMapping[str, Any], HeadersMixin):
-
+class BaseRequest(MutableMapping[str | RequestKey[Any], Any], HeadersMixin):
     POST_METHODS = {
         hdrs.METH_PATCH,
         hdrs.METH_POST,
@@ -131,6 +136,7 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
     )
     _post: MultiDictProxy[str | bytes | FileField] | None = None
     _read_bytes: bytes | None = None
+    _seen_str_keys: set[str] = set()
 
     def __init__(
         self,
@@ -142,7 +148,7 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
         loop: asyncio.AbstractEventLoop,
         *,
         client_max_size: int = 1024**2,
-        state: dict[str, Any] | None = None,
+        state: dict[RequestKey[Any] | str, Any] | None = None,
         scheme: str | None = None,
         host: str | None = None,
         remote: str | None = None,
@@ -286,19 +292,40 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
 
     # MutableMapping API
 
-    def __getitem__(self, key: str) -> Any:
+    @overload  # type: ignore[override]
+    def __getitem__(self, key: RequestKey[_T]) -> _T: ...
+
+    @overload
+    def __getitem__(self, key: str) -> Any: ...
+
+    def __getitem__(self, key: str | RequestKey[_T]) -> Any:
         return self._state[key]
 
-    def __setitem__(self, key: str, value: Any) -> None:
+    @overload  # type: ignore[override]
+    def __setitem__(self, key: RequestKey[_T], value: _T) -> None: ...
+
+    @overload
+    def __setitem__(self, key: str, value: Any) -> None: ...
+
+    def __setitem__(self, key: str | RequestKey[_T], value: Any) -> None:
+        if not isinstance(key, RequestKey) and key not in BaseRequest._seen_str_keys:
+            BaseRequest._seen_str_keys.add(key)
+            warnings.warn(
+                "It is recommended to use web.RequestKey instances for keys.\n"
+                + "https://docs.aiohttp.org/en/stable/web_advanced.html"
+                + "#request-s-storage",
+                category=NotAppKeyWarning,
+                stacklevel=2,
+            )
         self._state[key] = value
 
-    def __delitem__(self, key: str) -> None:
+    def __delitem__(self, key: str | RequestKey[_T]) -> None:
         del self._state[key]
 
     def __len__(self) -> int:
         return len(self._state)
 
-    def __iter__(self) -> Iterator[str]:
+    def __iter__(self) -> Iterator[str | RequestKey[Any]]:
         return iter(self._state)
 
     ########
@@ -590,7 +617,7 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
         if rng is not None:
             try:
                 pattern = r"^bytes=(\d*)-(\d*)$"
-                start, end = re.findall(pattern, rng)[0]
+                start, end = re.findall(pattern, rng, re.ASCII)[0]
             except IndexError:  # pattern was not found in header
                 raise ValueError("range not in acceptable format")
 
@@ -651,16 +678,18 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
         Returns bytes object with full request content.
         """
         if self._read_bytes is None:
+            # Raise the buffer limits so compressed payloads decompress in
+            # larger chunks instead of many small pause/resume cycles.
+            if self._client_max_size:
+                self._payload.set_read_chunk_size(self._client_max_size)
             body = bytearray()
             while True:
                 chunk = await self._payload.readany()
                 body.extend(chunk)
                 if self._client_max_size:
                     body_size = len(body)
-                    if body_size >= self._client_max_size:
-                        raise HTTPRequestEntityTooLarge(
-                            max_size=self._client_max_size, actual_size=body_size
-                        )
+                    if body_size > self._client_max_size:
+                        raise HTTPRequestEntityTooLarge(self._client_max_size)
                 if not chunk:
                     break
             self._read_bytes = bytes(body)
@@ -679,7 +708,14 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
 
     async def multipart(self) -> MultipartReader:
         """Return async iterator to process BODY as multipart."""
-        return MultipartReader(self._headers, self._payload)
+        return MultipartReader(
+            self._headers,
+            self._payload,
+            client_max_size=self._client_max_size,
+            max_field_size=self._protocol.max_field_size,
+            max_headers=self._protocol.max_headers,
+            max_size_error_cls=HTTPRequestEntityTooLarge,
+        )
 
     async def post(self) -> "MultiDictProxy[str | bytes | FileField]":
         """Return POST parameters."""
@@ -704,13 +740,13 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
             multipart = await self.multipart()
             max_size = self._client_max_size
 
-            field = await multipart.next()
-            while field is not None:
-                size = 0
+            size = 0
+            while (field := await multipart.next()) is not None:
                 field_ct = field.headers.get(hdrs.CONTENT_TYPE)
 
                 if isinstance(field, BodyPartReader):
-                    assert field.name is not None
+                    if field.name is None:
+                        raise ValueError("Multipart field missing name.")
 
                     # Note that according to RFC 7578, the Content-Type header
                     # is optional, even for files, so we can't assume it's
@@ -721,17 +757,15 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
                         tmp = await self._loop.run_in_executor(
                             None, tempfile.TemporaryFile
                         )
-                        chunk = await field.read_chunk(size=2**16)
-                        while chunk:
-                            chunk = field.decode(chunk)
-                            await self._loop.run_in_executor(None, tmp.write, chunk)
-                            size += len(chunk)
-                            if 0 < max_size < size:
-                                await self._loop.run_in_executor(None, tmp.close)
-                                raise HTTPRequestEntityTooLarge(
-                                    max_size=max_size, actual_size=size
+                        while chunk := await field.read_chunk(size=DEFAULT_CHUNK_SIZE):
+                            async for decoded_chunk in field.decode_iter(chunk):
+                                await self._loop.run_in_executor(
+                                    None, tmp.write, decoded_chunk
                                 )
-                            chunk = await field.read_chunk(size=2**16)
+                                size += len(decoded_chunk)
+                                if 0 < max_size < size:
+                                    await self._loop.run_in_executor(None, tmp.close)
+                                    raise HTTPRequestEntityTooLarge(max_size)
                         await self._loop.run_in_executor(None, tmp.seek, 0)
 
                         if field_ct is None:
@@ -747,23 +781,27 @@ class BaseRequest(MutableMapping[str, Any], HeadersMixin):
                         out.add(field.name, ff)
                     else:
                         # deal with ordinary data
-                        value = await field.read(decode=True)
+                        raw_data = bytearray()
+                        while chunk := await field.read_chunk():
+                            size += len(chunk)
+                            if 0 < max_size < size:
+                                raise HTTPRequestEntityTooLarge(max_size)
+                            raw_data.extend(chunk)
+
+                        value = bytearray()
+                        # form-data doesn't support compression, so don't need to check size again.
+                        async for d in field.decode_iter(raw_data):
+                            value.extend(d)
+
                         if field_ct is None or field_ct.startswith("text/"):
                             charset = field.get_charset(default="utf-8")
                             out.add(field.name, value.decode(charset))
                         else:
                             out.add(field.name, value)
-                        size += len(value)
-                        if 0 < max_size < size:
-                            raise HTTPRequestEntityTooLarge(
-                                max_size=max_size, actual_size=size
-                            )
                 else:
                     raise ValueError(
                         "To decode nested multipart you need to use custom reader",
                     )
-
-                field = await multipart.next()
         else:
             data = await self.read()
             if data:

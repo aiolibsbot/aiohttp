@@ -75,9 +75,9 @@ NEEDS_CLEANUP_CLOSED = (3, 13, 0) <= sys.version_info < (
     3,
     13,
     1,
-) or sys.version_info < (3, 12, 7)
+) or sys.version_info < (3, 12, 8)
 # Cleanup closed is no longer needed after https://github.com/python/cpython/pull/118960
-# which first appeared in Python 3.12.7 and 3.13.1
+# which first appeared in Python 3.12.8 and 3.13.1
 
 
 __all__ = (
@@ -592,6 +592,32 @@ class BaseConnector:
 
         return total_remain
 
+    def _update_proxy_auth_header_and_build_proxy_req(
+        self, req: ClientRequest
+    ) -> ClientRequest:
+        """Set Proxy-Authorization header for non-SSL proxy requests and builds the proxy request for SSL proxy requests."""
+        url = req.proxy
+        assert url is not None
+        headers: dict[str, str] = {}
+        if req.proxy_headers is not None:
+            headers = req.proxy_headers  # type: ignore[assignment]
+        headers[hdrs.HOST] = req.headers[hdrs.HOST]
+        proxy_req = ClientRequest(
+            hdrs.METH_GET,
+            url,
+            headers=headers,
+            auth=req.proxy_auth,
+            loop=self._loop,
+            ssl=req.ssl,
+        )
+        auth = proxy_req.headers.pop(hdrs.AUTHORIZATION, None)
+        if auth is not None:
+            if not req.is_ssl():
+                req.headers[hdrs.PROXY_AUTHORIZATION] = auth
+            else:
+                proxy_req.headers[hdrs.PROXY_AUTHORIZATION] = auth
+        return proxy_req
+
     async def connect(
         self, req: ClientRequest, traces: list["Trace"], timeout: "ClientTimeout"
     ) -> Connection:
@@ -600,12 +626,16 @@ class BaseConnector:
         if (conn := await self._get(key, traces)) is not None:
             # If we do not have to wait and we can get a connection from the pool
             # we can avoid the timeout ceil logic and directly return the connection
+            if req.proxy:
+                self._update_proxy_auth_header_and_build_proxy_req(req)
             return conn
 
         async with ceil_timeout(timeout.connect, timeout.ceil_threshold):
             if self._available_connections(key) <= 0:
                 await self._wait_for_available_connection(key, traces)
                 if (conn := await self._get(key, traces)) is not None:
+                    if req.proxy:
+                        self._update_proxy_auth_header_and_build_proxy_req(req)
                     return conn
 
             placeholder = cast(
@@ -809,25 +839,33 @@ class BaseConnector:
 
 
 class _DNSCacheTable:
-    def __init__(self, ttl: float | None = None) -> None:
-        self._addrs_rr: dict[tuple[str, int], tuple[Iterator[ResolveResult], int]] = {}
+    def __init__(self, ttl: float | None = None, max_size: int = 1000) -> None:
+        self._addrs_rr: OrderedDict[
+            tuple[str, int], tuple[Iterator[ResolveResult], int]
+        ] = OrderedDict()
         self._timestamps: dict[tuple[str, int], float] = {}
         self._ttl = ttl
+        self._max_size = max_size
 
     def __contains__(self, host: object) -> bool:
         return host in self._addrs_rr
 
     def add(self, key: tuple[str, int], addrs: list[ResolveResult]) -> None:
+        if key in self._addrs_rr:
+            self._addrs_rr.move_to_end(key)
+
         self._addrs_rr[key] = (cycle(addrs), len(addrs))
 
         if self._ttl is not None:
             self._timestamps[key] = monotonic()
 
+        if len(self._addrs_rr) > self._max_size:
+            oldest_key, _ = self._addrs_rr.popitem(last=False)
+            self._timestamps.pop(oldest_key, None)
+
     def remove(self, key: tuple[str, int]) -> None:
         self._addrs_rr.pop(key, None)
-
-        if self._ttl is not None:
-            self._timestamps.pop(key, None)
+        self._timestamps.pop(key, None)
 
     def clear(self) -> None:
         self._addrs_rr.clear()
@@ -838,6 +876,7 @@ class _DNSCacheTable:
         addrs = list(islice(loop, length))
         # Consume one more element to shift internal state of `cycle`
         next(loop)
+        self._addrs_rr.move_to_end(key)
         return addrs
 
     def expired(self, key: tuple[str, int]) -> bool:
@@ -926,6 +965,7 @@ class TCPConnector(BaseConnector):
         fingerprint: bytes | None = None,
         use_dns_cache: bool = True,
         ttl_dns_cache: int | None = 10,
+        dns_cache_max_size: int = 1000,
         family: socket.AddressFamily = socket.AddressFamily.AF_UNSPEC,
         ssl_context: SSLContext | None = None,
         ssl: bool | Fingerprint | SSLContext = True,
@@ -964,7 +1004,9 @@ class TCPConnector(BaseConnector):
             self._resolver_owner = False
 
         self._use_dns_cache = use_dns_cache
-        self._cached_hosts = _DNSCacheTable(ttl=ttl_dns_cache)
+        self._cached_hosts = _DNSCacheTable(
+            ttl=ttl_dns_cache, max_size=dns_cache_max_size
+        )
         self._throttle_dns_futures: dict[tuple[str, int], set[asyncio.Future[None]]] = (
             {}
         )
@@ -1345,6 +1387,12 @@ class TCPConnector(BaseConnector):
         if req.request_info.url.scheme != "https":
             return
 
+        # TLS-in-TLS only applies when the proxy itself is HTTPS.
+        # When the proxy is HTTP, start_tls upgrades a plain TCP connection,
+        # which is standard TLS and works on all event loops and Python versions.
+        if req.proxy is None or req.proxy.scheme != "https":
+            return
+
         # Check if uvloop is being used, which supports TLS in TLS,
         # otherwise assume that asyncio's native transport is being used.
         if type(underlying_transport).__module__.startswith("uvloop"):
@@ -1406,7 +1454,7 @@ class TCPConnector(BaseConnector):
                             tls_proto,
                             sslcontext,
                             server_hostname=req.server_hostname or req.host,
-                            ssl_handshake_timeout=timeout.total,
+                            ssl_handshake_timeout=timeout.total or None,
                             ssl_shutdown_timeout=self._ssl_shutdown_timeout,
                         )
                     else:
@@ -1415,7 +1463,7 @@ class TCPConnector(BaseConnector):
                             tls_proto,
                             sslcontext,
                             server_hostname=req.server_hostname or req.host,
-                            ssl_handshake_timeout=timeout.total,
+                            ssl_handshake_timeout=timeout.total or None,
                         )
                 except BaseException:
                     # We need to close the underlying transport since
@@ -1566,34 +1614,12 @@ class TCPConnector(BaseConnector):
     ) -> tuple[asyncio.BaseTransport, ResponseHandler]:
         self._fail_on_no_start_tls(req)
         runtime_has_start_tls = self._loop_supports_start_tls()
-
-        headers: dict[str, str] = {}
-        if req.proxy_headers is not None:
-            headers = req.proxy_headers  # type: ignore[assignment]
-        headers[hdrs.HOST] = req.headers[hdrs.HOST]
-
-        url = req.proxy
-        assert url is not None
-        proxy_req = ClientRequest(
-            hdrs.METH_GET,
-            url,
-            headers=headers,
-            auth=req.proxy_auth,
-            loop=self._loop,
-            ssl=req.ssl,
-        )
+        proxy_req = self._update_proxy_auth_header_and_build_proxy_req(req)
 
         # create connection to proxy server
         transport, proto = await self._create_direct_connection(
             proxy_req, [], timeout, client_error=ClientProxyConnectionError
         )
-
-        auth = proxy_req.headers.pop(hdrs.AUTHORIZATION, None)
-        if auth is not None:
-            if not req.is_ssl():
-                req.headers[hdrs.PROXY_AUTHORIZATION] = auth
-            else:
-                proxy_req.headers[hdrs.PROXY_AUTHORIZATION] = auth
 
         if req.is_ssl():
             if runtime_has_start_tls:

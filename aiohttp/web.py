@@ -11,7 +11,7 @@ from importlib import import_module
 from typing import TYPE_CHECKING, Any, cast
 
 from .abc import AbstractAccessLogger
-from .helpers import AppKey as AppKey
+from .helpers import AppKey, RequestKey, ResponseKey
 from .log import access_logger
 from .typedefs import PathLike
 from .web_app import Application as Application, CleanupError as CleanupError
@@ -96,6 +96,7 @@ from .web_response import (
     ContentCoding as ContentCoding,
     Response as Response,
     StreamResponse as StreamResponse,
+    json_bytes_response as json_bytes_response,
     json_response as json_response,
 )
 from .web_routedef import (
@@ -223,11 +224,14 @@ __all__ = (
     "BaseRequest",
     "FileField",
     "Request",
+    "RequestKey",
     # web_response
     "ContentCoding",
     "Response",
     "StreamResponse",
+    "json_bytes_response",
     "json_response",
+    "ResponseKey",
     # web_routedef
     "AbstractRouteDef",
     "RouteDef",

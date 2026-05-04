@@ -10,6 +10,373 @@
 
 .. towncrier release notes start
 
+3.13.5 (2026-03-31)
+===================
+
+Bug fixes
+---------
+
+- Skipped the duplicate singleton header check in lax mode (the default for response
+  parsing). In strict mode (request parsing, or ``-X dev``), all RFC 9110 singletons
+  are still enforced -- by :user:`bdraco`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12302`.
+
+
+
+
+----
+
+
+3.13.4 (2026-03-28)
+===================
+
+Features
+--------
+
+- Added ``max_headers`` parameter to limit the number of headers that should be read from a response -- by :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11955`.
+
+
+
+- Added a ``dns_cache_max_size`` parameter to ``TCPConnector`` to limit the size of the cache -- by :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12106`.
+
+
+
+Bug fixes
+---------
+
+- Fixed server hanging indefinitely when chunked transfer encoding chunk-size
+  does not match actual data length. The server now raises
+  ``TransferEncodingError`` instead of waiting forever for data that will
+  never arrive -- by :user:`Fridayai700`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`10596`.
+
+
+
+- Fixed access log timestamps ignoring daylight saving time (DST) changes. The
+  previous implementation used :py:data:`time.timezone` which is a constant and
+  does not reflect DST transitions -- by :user:`nightcityblade`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11283`.
+
+
+
+- Fixed ``RuntimeError: An event loop is running`` error when using ``aiohttp.GunicornWebWorker``
+  or ``aiohttp.GunicornUVLoopWebWorker`` on Python >=3.14.
+  -- by :user:`Tasssadar`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11701`.
+
+
+
+- Fixed :exc:`ValueError` when creating a TLS connection with ``ClientTimeout(total=0)`` by converting ``0`` to ``None`` before passing to ``ssl_handshake_timeout`` in :py:meth:`asyncio.loop.start_tls` -- by :user:`veeceey`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11859`.
+
+
+
+- Restored :py:meth:`~aiohttp.BodyPartReader.decode` as a synchronous method
+  for backward compatibility. The method was inadvertently changed to async
+  in 3.13.3 as part of the decompression bomb security fix. A new
+  :py:meth:`~aiohttp.BodyPartReader.decode_iter` method is now available
+  for non-blocking decompression of large payloads using an async generator.
+  Internal aiohttp code uses the async variant to maintain security protections.
+
+  Changed multipart processing chunk sizes from 64 KiB to 256KiB, to better
+  match aiohttp internals
+  -- by :user:`bdraco` and :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11898`.
+
+
+
+- Fixed false-positive :py:class:`DeprecationWarning` for passing ``enable_cleanup_closed=True`` to :py:class:`~aiohttp.TCPConnector` specifically on Python 3.12.7.
+  -- by :user:`Robsdedude`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11972`.
+
+
+
+- Fixed _sendfile_fallback over-reading beyond requested count -- by :user:`bysiber`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12096`.
+
+
+
+- Fixed digest auth dropping challenge fields with empty string values -- by :user:`bysiber`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12097`.
+
+
+
+- ``ClientConnectorCertificateError.os_error`` no longer raises :exc:`AttributeError`
+  -- by :user:`themylogin`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12136`.
+
+
+
+- Adjusted pure-Python request header value validation to align with RFC 9110 control-character handling, while preserving lax response parser behavior, and added regression tests for Host/header control-character cases.
+  -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12231`.
+
+
+
+- Rejected duplicate singleton headers (``Host``, ``Content-Type``,
+  ``Content-Length``, etc.) in the C extension HTTP parser to match
+  the pure Python parser behaviour, preventing potential host-based
+  access control bypasses via parser differentials
+  -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12240`.
+
+
+
+- Aligned the pure-Python HTTP request parser with the C parser by splitting
+  comma-separated and repeated ``Connection`` header values for keep-alive,
+  close, and upgrade handling -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12249`.
+
+
+
+
+Improved documentation
+----------------------
+
+- Documented :exc:`asyncio.TimeoutError` for ``WebSocketResponse.receive()``
+  and related methods -- by :user:`veeceey`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12042`.
+
+
+
+
+Packaging updates and notes for downstreams
+-------------------------------------------
+
+- Upgraded llhttp to 3.9.1 -- by :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12069`.
+
+
+
+
+Contributor-facing changes
+--------------------------
+
+- The benchmark CI job now runs only in the upstream repository -- by :user:`Cycloctane`.
+
+  It used to always fail in forks, which this change fixed.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11737`.
+
+
+
+- Fixed flaky performance tests by using appropriate fixed thresholds that account for CI variability -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11992`.
+
+
+
+
+Miscellaneous internal changes
+------------------------------
+
+- Fixed ``test_invalid_idna`` to work with ``idna`` 3.11 by using an invalid character (``\u0080``) that is rejected by ``yarl`` during URL construction -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12027`.
+
+
+
+- Fixed race condition in ``test_data_file`` on Python 3.14 free-threaded builds -- by :user:`rodrigobnogueira`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`12170`.
+
+
+
+
+----
+
+
+3.13.3 (2026-01-03)
+===================
+
+This release contains fixes for several vulnerabilities. It is advised to
+upgrade as soon as possible.
+
+Bug fixes
+---------
+
+- Fixed proxy authorization headers not being passed when reusing a connection, which caused 407 (Proxy authentication required) errors
+  -- by :user:`GLeurquin`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`2596`.
+
+
+
+- Fixed multipart reading failing when encountering an empty body part -- by :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11857`.
+
+
+
+- Fixed a case where the parser wasn't raising an exception for a websocket continuation frame when there was no initial frame in context.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11862`.
+
+
+
+
+Removals and backward incompatible breaking changes
+---------------------------------------------------
+
+- ``Brotli`` and ``brotlicffi`` minimum version is now 1.2.
+  Decompression now has a default maximum output size of 32MiB per decompress call -- by :user:`Dreamsorcerer`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11898`.
+
+
+
+
+Packaging updates and notes for downstreams
+-------------------------------------------
+
+- Moved dependency metadata from :file:`setup.cfg` to :file:`pyproject.toml` per :pep:`621`
+  -- by :user:`cdce8p`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11643`.
+
+
+
+
+Contributor-facing changes
+--------------------------
+
+- Removed unused ``update-pre-commit`` github action workflow -- by :user:`Cycloctane`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11689`.
+
+
+
+
+Miscellaneous internal changes
+------------------------------
+
+- Optimized web server performance when access logging is disabled by reducing time syscalls -- by :user:`bdraco`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`10713`.
+
+
+
+- Added regression test for cached logging status -- by :user:`meehand`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11778`.
+
+
+
+
+----
+
+
+3.13.2 (2025-10-28)
+===================
+
+Bug fixes
+---------
+
+- Fixed cookie parser to continue parsing subsequent cookies when encountering a malformed cookie that fails regex validation, such as Google's ``g_state`` cookie with unescaped quotes -- by :user:`bdraco`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11632`.
+
+
+
+- Fixed loading netrc credentials from the default :file:`~/.netrc` (:file:`~/_netrc` on Windows) location when the :envvar:`NETRC` environment variable is not set -- by :user:`bdraco`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11713`, :issue:`11714`.
+
+
+
+- Fixed WebSocket compressed sends to be cancellation safe. Tasks are now shielded during compression to prevent compressor state corruption. This ensures that the stateful compressor remains consistent even when send operations are cancelled -- by :user:`bdraco`.
+
+
+  *Related issues and pull requests on GitHub:*
+  :issue:`11725`.
+
+
+
+
+----
+
+
 3.13.1 (2025-10-17)
 ===================
 

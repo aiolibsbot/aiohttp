@@ -61,8 +61,10 @@ def patched_loop(
 ) -> Iterator[asyncio.AbstractEventLoop]:
     server = mock.create_autospec(asyncio.Server, spec_set=True, instance=True)
     server.wait_closed.return_value = None
+    server.sockets = []
     unix_server = mock.create_autospec(asyncio.Server, spec_set=True, instance=True)
     unix_server.wait_closed.return_value = None
+    unix_server.sockets = []
     with mock.patch.object(
         loop, "create_server", autospec=True, spec_set=True, return_value=server
     ):
@@ -1234,6 +1236,7 @@ class TestShutdown:
             nonlocal t
             t = asyncio.create_task(test())
             yield
+            await asyncio.sleep(0)  # In case test() hasn't resumed yet.
             t.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await t
