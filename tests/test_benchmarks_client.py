@@ -205,7 +205,7 @@ def test_one_hundred_get_requests_with_30000_chunked_payload(
         event_loop.run_until_complete(run_client_benchmark())
 
 
-def test_one_hundred_get_requests_with_1mb_chunked_payload(
+def test_one_hundred_get_requests_with_10mb_chunked_payload(
     event_loop: asyncio.AbstractEventLoop,
     aiohttp_client: AiohttpClient,
     benchmark: BenchmarkFixture,
@@ -234,7 +234,7 @@ def test_one_hundred_get_requests_with_1mb_chunked_payload(
         event_loop.run_until_complete(run_client_benchmark())
 
 
-def test_one_hundred_get_requests_iter_chunks_on_1mb_chunked_payload(
+def test_one_hundred_get_requests_iter_chunks_on_10mb_chunked_payload(
     event_loop: asyncio.AbstractEventLoop,
     aiohttp_client: AiohttpClient,
     benchmark: BenchmarkFixture,
@@ -355,7 +355,7 @@ def test_one_hundred_get_requests_with_30000_content_length_payload(
         event_loop.run_until_complete(run_client_benchmark())
 
 
-def test_one_hundred_get_requests_with_1mb_content_length_payload(
+def test_one_hundred_get_requests_with_10mb_content_length_payload(
     event_loop: asyncio.AbstractEventLoop,
     aiohttp_client: AiohttpClient,
     benchmark: BenchmarkFixture,
